@@ -8,14 +8,20 @@ using UnityEngine;
 namespace ZUI.InputBlocking
 {
     /// <summary>
-    /// Input blocker that briefly blocks game inputs during UI clicks.
-    /// Provides a momentary "shield" to prevent clicks from passing through to the game.
+    /// Input blocker that blocks game inputs while the user interacts with ZUI panels.
+    /// Supports both momentary click blocking and sustained interaction blocking.
     /// </summary>
     public static class ZUIInputBlocker
     {
         private static bool _shouldBlock = false;
         private static bool _isInitialized = false;
         private static Coroutine _unblockCoroutine;
+        
+        /// <summary>
+        /// Tracks whether input is being held blocked by panel interaction
+        /// (as opposed to momentary click blocking).
+        /// </summary>
+        private static bool _isHeldBlock = false;
 
         /// <summary>
         /// Gets whether game inputs should currently be blocked.
@@ -31,8 +37,9 @@ namespace ZUI.InputBlocking
             if (_isInitialized) return;
 
             _shouldBlock = false;
+            _isHeldBlock = false;
             _isInitialized = true;
-            UnityEngine.Debug.Log("[ZUI] InputBlocker initialized - starting UNBLOCKED");
+            UnityEngine.Debug.Log("[ZUI] InputBlocker initialized — starting UNBLOCKED");
         }
 
         /// <summary>
@@ -47,6 +54,10 @@ namespace ZUI.InputBlocking
                 Initialize();
             }
 
+            // Don't interrupt a held block with a momentary one
+            if (_isHeldBlock)
+                return;
+
             _shouldBlock = true;
             UnityEngine.Debug.Log($"[ZUI] Momentary input block START ({duration}s)");
 
@@ -56,8 +67,81 @@ namespace ZUI.InputBlocking
                 Plugin.CoreUpdateBehavior.StopCoroutine(_unblockCoroutine);
             }
 
-            // Start new unblock timer
             _unblockCoroutine = Plugin.CoreUpdateBehavior.StartCoroutine(UnblockAfterDelay(duration));
+        }
+
+        /// <summary>
+        /// Sustained block: holds input blocked while the user is interacting 
+        /// with a ZUI panel (cursor hovering, clicking, dragging, resizing).
+        /// Call BeginInteraction() when pointer enters a panel,
+        /// and EndInteraction() when pointer leaves all panels.
+        /// 
+        /// Uses reference counting so nested panels work correctly.
+        /// </summary>
+        private static int _interactionRefCount = 0;
+
+        /// <summary>
+        /// Call when the pointer enters a ZUI panel or user begins panel interaction.
+        /// </summary>
+        public static void BeginInteraction()
+        {
+            if (!_isInitialized) Initialize();
+
+            _interactionRefCount++;
+            
+            if (!_shouldBlock)
+            {
+                _shouldBlock = true;
+                _isHeldBlock = true;
+                
+                // Cancel momentary unblock timer if running
+                if (_unblockCoroutine != null)
+                {
+                    Plugin.CoreUpdateBehavior.StopCoroutine(_unblockCoroutine);
+                    _unblockCoroutine = null;
+                }
+                
+                UnityEngine.Debug.Log($"[ZUI] Input held-block START (refs: {_interactionRefCount})");
+            }
+        }
+
+        /// <summary>
+        /// Call when the pointer leaves a ZUI panel or user ends panel interaction.
+        /// Uses reference counting: only unblocks when ALL interactions end.
+        /// </summary>
+        public static void EndInteraction()
+        {
+            if (_interactionRefCount > 0)
+                _interactionRefCount--;
+            
+            if (_interactionRefCount <= 0 && _isHeldBlock)
+            {
+                _interactionRefCount = 0;
+                _shouldBlock = false;
+                _isHeldBlock = false;
+                UnityEngine.Debug.Log("[ZUI] Input held-block END (all interactions finished)");
+            }
+        }
+
+        /// <summary>
+        /// Forcefully clears all held blocks. Use when UI is closed/hidden.
+        /// </summary>
+        public static void ForceUnblock()
+        {
+            _interactionRefCount = 0;
+            _isHeldBlock = false;
+            
+            if (_unblockCoroutine != null)
+            {
+                Plugin.CoreUpdateBehavior.StopCoroutine(_unblockCoroutine);
+                _unblockCoroutine = null;
+            }
+
+            if (_shouldBlock)
+            {
+                _shouldBlock = false;
+                UnityEngine.Debug.Log("[ZUI] Input block FORCE cleared");
+            }
         }
 
         /// <summary>
@@ -71,6 +155,9 @@ namespace ZUI.InputBlocking
                 _unblockCoroutine = null;
             }
 
+            _isHeldBlock = false;
+            _interactionRefCount = 0;
+
             if (_shouldBlock)
             {
                 _shouldBlock = false;
@@ -81,14 +168,19 @@ namespace ZUI.InputBlocking
         private static IEnumerator UnblockAfterDelay(float delay)
         {
             yield return new WaitForSeconds(delay);
-            _shouldBlock = false;
-            _unblockCoroutine = null;
-            UnityEngine.Debug.Log("[ZUI] Momentary input block END");
+            
+            // Only unblock if not held by panel interaction
+            if (!_isHeldBlock)
+            {
+                _shouldBlock = false;
+                _unblockCoroutine = null;
+                UnityEngine.Debug.Log("[ZUI] Momentary input block END");
+            }
         }
 
         /// <summary>
-        /// Legacy method - kept for compatibility but not recommended.
-        /// Use BlockMomentarily() instead for click handling.
+        /// Legacy method — kept for compatibility but not recommended.
+        /// Use BlockMomentarily() for click handling or BeginInteraction()/EndInteraction() for panel interaction.
         /// </summary>
         public static void SetBlocking(bool block)
         {
@@ -100,6 +192,8 @@ namespace ZUI.InputBlocking
             if (_shouldBlock != block)
             {
                 _shouldBlock = block;
+                _isHeldBlock = block;
+                if (!block) _interactionRefCount = 0;
                 UnityEngine.Debug.Log($"[ZUI] Game input blocking: {(block ? "ENABLED" : "disabled")}");
             }
         }
